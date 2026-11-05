@@ -1,4 +1,5 @@
-
+import zipfile
+from io import BytesIO
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -23,21 +24,29 @@ def number_col(df, col):
         return pd.to_numeric(df[col], errors="coerce").fillna(0)
     return pd.Series(0, index=df.index, dtype="float64")
 
-st.sidebar.header("Upload IPL Datasets")
+st.sidebar.header("IPL Dataset")
 
-matches_file = st.sidebar.file_uploader(
-    "Upload matches.csv", type=["csv"]
-)
-deliveries_file = st.sidebar.file_uploader(
-    "Upload deliveries.csv", type=["csv"]
-)
+try:
+    matches = pd.read_csv("matches.csv")
 
-if matches_file is None or deliveries_file is None:
-    st.info("Upload both matches.csv and deliveries.csv from the sidebar.")
+    with zipfile.ZipFile("deliveries.zip") as zip_file:
+        csv_files = [
+            name for name in zip_file.namelist()
+            if name.lower().endswith(".csv")
+        ]
+
+        if not csv_files:
+            st.error("No CSV file found inside deliveries.zip")
+            st.stop()
+
+        with zip_file.open(csv_files[0]) as file:
+            df = pd.read_csv(file)
+
+    st.success("IPL datasets loaded successfully!")
+
+except Exception as e:
+    st.error(f"Dataset loading error: {e}")
     st.stop()
-
-matches = pd.read_csv(matches_file)
-df = pd.read_csv(deliveries_file)
 
 # Identify columns
 season_col = find_col(matches, ["season", "Season", "year"])
