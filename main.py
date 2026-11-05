@@ -1,8 +1,10 @@
+
 import zipfile
-from io import BytesIO
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+
+# ---------------- PAGE SETTINGS ----------------
 
 st.set_page_config(
     page_title="IPL Performance Analysis",
@@ -13,109 +15,156 @@ st.set_page_config(
 st.title("🏏 IPL Team and Player Performance Analysis")
 st.caption("Interactive IPL analytics dashboard")
 
+# ---------------- HELPER FUNCTIONS ----------------
+
 def find_col(df, options):
     for col in options:
         if col in df.columns:
             return col
     return None
 
+
 def number_col(df, col):
     if col and col in df.columns:
         return pd.to_numeric(df[col], errors="coerce").fillna(0)
+
     return pd.Series(0, index=df.index, dtype="float64")
+
+
+# ---------------- LOAD DATASETS ----------------
 
 st.sidebar.header("IPL Dataset")
 
 try:
     matches = pd.read_csv("matches.csv")
 
-    with zipfile.ZipFile("deliveries.zip") as zip_file:
-        csv_files = [
+    with zipfile.ZipFile("deliveries.zip", "r") as zip_file:
+
+        # Find a file inside ZIP, regardless of its spelling
+        files_inside_zip = [
             name for name in zip_file.namelist()
-            if name.lower().endswith(".csv")
+            if not name.endswith("/")
         ]
 
-        if not csv_files:
-            st.error("No CSV file found inside deliveries.zip")
+        if not files_inside_zip:
+            st.error("The ZIP file is empty.")
             st.stop()
 
-        with zip_file.open(csv_files[0]) as file:
+        # Prefer CSV or CSV.TXT files
+        csv_files = [
+            name for name in files_inside_zip
+            if name.lower().endswith((".csv", ".csv.txt"))
+        ]
+
+        # If extension is unusual, use the first file
+        selected_file = (
+            csv_files[0] if csv_files else files_inside_zip[0]
+        )
+
+        with zip_file.open(selected_file) as file:
             df = pd.read_csv(file)
 
-    st.success("IPL datasets loaded successfully!")
+    st.sidebar.success("Datasets loaded successfully!")
+
+except FileNotFoundError as e:
+    st.error(f"Dataset file not found: {e}")
+    st.info("Check that matches.csv and deliveries.zip are in your GitHub repository.")
+    st.stop()
+
+except zipfile.BadZipFile:
+    st.error("deliveries.zip is not a valid ZIP file.")
+    st.stop()
 
 except Exception as e:
     st.error(f"Dataset loading error: {e}")
     st.stop()
 
-# Identify columns
+
+# ---------------- IDENTIFY COLUMNS ----------------
+
 season_col = find_col(matches, ["season", "Season", "year"])
 winner_col = find_col(matches, ["winner", "Winner"])
 team1_col = find_col(matches, ["team1", "Team1"])
 team2_col = find_col(matches, ["team2", "Team2"])
 
+match_id_col = find_col(matches, ["id", "match_id"])
+delivery_id_col = find_col(df, ["match_id", "id"])
+
 batter_col = find_col(df, ["batter", "batsman"])
 bowler_col = find_col(df, ["bowler"])
+
 runs_col = find_col(df, ["batter_runs", "batsman_runs"])
 total_runs_col = find_col(df, ["total_runs"])
+
 wide_col = find_col(df, ["wide_runs"])
 noball_col = find_col(df, ["noball_runs"])
 bye_col = find_col(df, ["bye_runs"])
 legbye_col = find_col(df, ["legbye_runs"])
 penalty_col = find_col(df, ["penalty_runs"])
+
 dismissal_col = find_col(df, ["dismissal_kind"])
 player_out_col = find_col(df, ["player_dismissed"])
 
-st.success("Both IPL datasets uploaded successfully!")
 
-# Overview
+# ---------------- DATASET OVERVIEW ----------------
+
 st.header("📊 Dataset Overview")
 
 c1, c2, c3 = st.columns(3)
-c1.metric("Total Matches", len(matches))
-c2.metric("Total Deliveries", len(df))
+
+c1.metric("Total Matches", f"{len(matches):,}")
+c2.metric("Total Deliveries", f"{len(df):,}")
 
 if batter_col:
-    c3.metric("Total Batters", df[batter_col].nunique())
+    c3.metric("Total Batters", f"{df[batter_col].nunique():,}")
 else:
     c3.metric("Total Batters", "N/A")
 
-# Season filter
+
+# ---------------- SEASON FILTER ----------------
+
+selected_matches = matches.copy()
+df_view = df.copy()
 
 if season_col:
-    seasons = sorted(matches[season_col].dropna().unique().tolist())
+
+    seasons = sorted(
+        matches[season_col].dropna().unique().tolist(),
+        key=lambda x: str(x)
+    )
+
     selected_season = st.sidebar.selectbox(
-        "Select Season",
+        "Select IPL Season",
         ["All Seasons"] + seasons
     )
 
     if selected_season != "All Seasons":
+
         selected_matches = matches[
             matches[season_col] == selected_season
         ].copy()
 
-        match_id_col = find_col(matches, ["id", "match_id"])
-        delivery_id_col = find_col(df, ["match_id", "id"])
-
         if match_id_col and delivery_id_col:
+
             selected_ids = selected_matches[match_id_col].unique()
+
             df_view = df[
                 df[delivery_id_col].isin(selected_ids)
             ].copy()
+
         else:
-            df_view = df.copy()
-    else:
-        selected_matches = matches.copy()
-        df_view = df.copy()
-else:
-    selected_matches = matches.copy()
-    df_view = df.copy()
+            st.warning(
+                "Match ID column not found. "
+                "Season filter is applied only to matches."
+            )
 
 
-# Team analysis
+# ---------------- TEAM PERFORMANCE ----------------
+
 st.header("🏆 Team Performance Analysis")
 
 if winner_col and team1_col and team2_col:
+
     played = pd.concat([
         selected_matches[team1_col],
         selected_matches[team2_col]
@@ -128,16 +177,26 @@ if winner_col and team1_col and team2_col:
         "Matches Played": played.values
     })
 
-    team_stats["Wins"] = team_stats["Team"].map(wins).fillna(0)
+    team_stats["Wins"] = (
+        team_stats["Team"].map(wins).fillna(0).astype(int)
+    )
+
     team_stats["Win Percentage"] = (
-        team_stats["Wins"] / team_stats["Matches Played"] * 100
+        team_stats["Wins"] /
+        team_stats["Matches Played"] * 100
     ).round(2)
 
     team_stats = team_stats.sort_values(
         "Wins", ascending=False
     )
 
-    st.dataframe(team_stats, use_container_width=True)
+    st.subheader("Team Statistics")
+
+    st.dataframe(
+        team_stats,
+        use_container_width=True,
+        hide_index=True
+    )
 
     fig = px.bar(
         team_stats,
@@ -146,6 +205,7 @@ if winner_col and team1_col and team2_col:
         color="Team",
         title="Total Wins by IPL Team"
     )
+
     st.plotly_chart(fig, use_container_width=True)
 
     fig = px.bar(
@@ -155,19 +215,26 @@ if winner_col and team1_col and team2_col:
         color="Team",
         title="Team Win Percentage"
     )
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.warning("Team or winner columns were not found in matches.csv.")
 
-# Season analysis
+    st.plotly_chart(fig, use_container_width=True)
+
+else:
+    st.warning("Team or winner columns were not found.")
+
+
+# ---------------- SEASON ANALYSIS ----------------
+
 st.header("📅 Season-wise Analysis")
 
 if season_col:
+
     season_data = (
         selected_matches.groupby(season_col)
         .size()
         .reset_index(name="Matches")
     )
+
+    season_data[season_col] = season_data[season_col].astype(str)
 
     fig = px.line(
         season_data,
@@ -176,40 +243,54 @@ if season_col:
         markers=True,
         title="Matches Played by Season"
     )
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.info("Season column is not available in matches.csv.")
 
-# Batting analysis
+    st.plotly_chart(fig, use_container_width=True)
+
+else:
+    st.info("Season column is not available.")
+
+
+# ---------------- BATTING PERFORMANCE ----------------
+
 st.header("🏏 Batting Performance")
 
 if batter_col and runs_col:
-    df_view["__runs"] = number_col(df_view, runs_col)
-    df_view["__wide"] = number_col(df_view, wide_col)
 
-    batting = df_view.groupby(batter_col).agg(
+    batting_data = df_view.copy()
+
+    batting_data["__runs"] = number_col(
+        batting_data, runs_col
+    )
+
+    batting_data["__wide"] = number_col(
+        batting_data, wide_col
+    )
+
+    # Wides are not counted as balls faced
+    batting_data["__balls_faced"] = (
+        batting_data["__wide"] == 0
+    ).astype(int)
+
+    batting = batting_data.groupby(batter_col).agg(
         Runs=("__runs", "sum"),
-        Balls_Faced=("__wide", lambda x: (x == 0).sum())
+        Balls_Faced=("__balls_faced", "sum")
     ).reset_index()
 
-    # Recalculate balls faced accurately from delivery rows
-    balls = df_view.assign(
-        __ball_faced=(df_view["__wide"] == 0).astype(int)
-    ).groupby(batter_col)["__ball_faced"].sum()
-
-    batting["Balls Faced"] = batting[batter_col].map(balls)
     batting["Strike Rate"] = (
-        batting["Runs"] / batting["Balls Faced"].replace(0, pd.NA) * 100
+        batting["Runs"] /
+        batting["Balls_Faced"].replace(0, pd.NA) * 100
     ).fillna(0).round(2)
 
-    batting = batting.sort_values("Runs", ascending=False)
+    batting = batting.sort_values(
+        "Runs", ascending=False
+    )
 
     st.subheader("Top 10 Batsmen")
+
     st.dataframe(
-        batting[["batter" if batter_col == "batter" else "batsman"
-                 if batter_col == "batsman" else batter_col,
-                 "Runs", "Balls Faced", "Strike Rate"]].head(10),
-        use_container_width=True
+        batting.head(10),
+        use_container_width=True,
+        hide_index=True
     )
 
     fig = px.bar(
@@ -219,80 +300,127 @@ if batter_col and runs_col:
         color="Runs",
         title="Top 10 Batsmen by Runs"
     )
+
     st.plotly_chart(fig, use_container_width=True)
 
     fig = px.bar(
-        batting.head(10),
+        batting.sort_values(
+            "Strike Rate", ascending=False
+        ).head(10),
         x=batter_col,
         y="Strike Rate",
         color="Strike Rate",
         title="Top 10 Batsmen by Strike Rate"
     )
+
     st.plotly_chart(fig, use_container_width=True)
+
 else:
     st.warning("Batter or batter-runs column not found.")
 
-# Bowling analysis
+
+# ---------------- BOWLING PERFORMANCE ----------------
+
 st.header("🎯 Bowling Performance")
 
 if bowler_col and total_runs_col:
-    df_view["__total"] = number_col(df_view, total_runs_col)
-    df_view["__bye"] = number_col(df_view, bye_col)
-    df_view["__legbye"] = number_col(df_view, legbye_col)
-    df_view["__penalty"] = number_col(df_view, penalty_col)
-    df_view["__wide"] = number_col(df_view, wide_col)
-    df_view["__noball"] = number_col(df_view, noball_col)
 
-    # Runs charged to bowler exclude byes, leg byes and penalty runs
-    df_view["__conceded"] = (
-        df_view["__total"] - df_view["__bye"]
-        - df_view["__legbye"] - df_view["__penalty"]
+    bowling_data = df_view.copy()
+
+    bowling_data["__total"] = number_col(
+        bowling_data, total_runs_col
     )
 
-    # Legal balls exclude wides and no-balls
-    df_view["__legal_ball"] = (
-        (df_view["__wide"] == 0) &
-        (df_view["__noball"] == 0)
+    bowling_data["__bye"] = number_col(
+        bowling_data, bye_col
+    )
+
+    bowling_data["__legbye"] = number_col(
+        bowling_data, legbye_col
+    )
+
+    bowling_data["__penalty"] = number_col(
+        bowling_data, penalty_col
+    )
+
+    bowling_data["__wide"] = number_col(
+        bowling_data, wide_col
+    )
+
+    bowling_data["__noball"] = number_col(
+        bowling_data, noball_col
+    )
+
+    # Runs charged to bowler
+    bowling_data["__conceded"] = (
+        bowling_data["__total"]
+        - bowling_data["__bye"]
+        - bowling_data["__legbye"]
+        - bowling_data["__penalty"]
+    )
+
+    # Legal deliveries
+    bowling_data["__legal_ball"] = (
+        (bowling_data["__wide"] == 0) &
+        (bowling_data["__noball"] == 0)
     ).astype(int)
 
-    bowling = df_view.groupby(bowler_col).agg(
+    bowling = bowling_data.groupby(bowler_col).agg(
         Runs_Conceded=("__conceded", "sum"),
         Legal_Balls=("__legal_ball", "sum")
     ).reset_index()
 
+    # Calculate wickets
     if dismissal_col:
+
         excluded = [
-            "run out", "retired hurt", "retired out",
+            "run out",
+            "retired hurt",
+            "retired out",
             "obstructing the field"
         ]
-        wickets_df = df_view[
-            df_view[dismissal_col].notna() &
-            (~df_view[dismissal_col].astype(str).str.lower().isin(excluded))
+
+        wickets_df = bowling_data[
+            bowling_data[dismissal_col].notna() &
+            (~bowling_data[dismissal_col]
+             .astype(str).str.lower().isin(excluded))
         ]
+
         wickets = wickets_df[bowler_col].value_counts()
+
     elif player_out_col:
-        wickets = df_view[
-            df_view[player_out_col].notna()
+
+        wickets = bowling_data[
+            bowling_data[player_out_col].notna()
         ][bowler_col].value_counts()
+
     else:
         wickets = pd.Series(dtype="int64")
 
-    bowling["Wickets"] = bowling[bowler_col].map(wickets).fillna(0)
-    bowling["Overs"] = (bowling["Legal_Balls"] / 6).round(1)
+    bowling["Wickets"] = (
+        bowling[bowler_col].map(wickets).fillna(0).astype(int)
+    )
+
+    bowling["Overs"] = (
+        bowling["Legal_Balls"] / 6
+    ).round(1)
+
     bowling["Economy"] = (
         bowling["Runs_Conceded"] /
         (bowling["Legal_Balls"] / 6).replace(0, pd.NA)
     ).fillna(0).round(2)
 
     bowling = bowling.sort_values(
-        ["Wickets", "Economy"], ascending=[False, True]
+        ["Wickets", "Economy"],
+        ascending=[False, True]
     )
 
     st.subheader("Top 10 Bowlers")
+
     st.dataframe(
-        bowling[[bowler_col, "Wickets", "Overs",
-                 "Runs_Conceded", "Economy"]].head(10),
-        use_container_width=True
+        bowling.head(10),
+        use_container_width=True,
+        hide_index=True
     )
 
     fig = px.bar(
@@ -302,26 +430,50 @@ if bowler_col and total_runs_col:
         color="Wickets",
         title="Top 10 Bowlers by Wickets"
     )
+
     st.plotly_chart(fig, use_container_width=True)
 
+    economy_data = bowling[
+        bowling["Legal_Balls"] >= 60
+    ].sort_values("Economy").head(10)
+
     fig = px.bar(
-        bowling.sort_values("Economy").head(10),
+        economy_data,
         x=bowler_col,
         y="Economy",
         color="Economy",
-        title="10 Best Economy Rates (minimum overs not applied)"
+        title="Best Economy Rates (Minimum 10 Overs)"
     )
+
     st.plotly_chart(fig, use_container_width=True)
+
 else:
     st.warning("Bowler or total-runs column not found.")
 
-# Dataset preview
+
+# ---------------- DATASET PREVIEW ----------------
+
 st.header("📁 Dataset Preview")
 
 with st.expander("View Matches Dataset"):
-    st.dataframe(selected_matches.head(20), use_container_width=True)
+
+    st.dataframe(
+        selected_matches.head(20),
+        use_container_width=True
+    )
 
 with st.expander("View Deliveries Dataset"):
-    st.dataframe(df_view.head(20), use_container_width=True)
 
-st.caption("IPL Performance Analysis | BCA AI Project")
+    st.dataframe(
+        df_view.head(20),
+        use_container_width=True
+    )
+
+
+# ---------------- FOOTER ----------------
+
+st.divider()
+
+st.caption(
+    "IPL Team and Player Performance Analysis | BCA AI Project"
+)
